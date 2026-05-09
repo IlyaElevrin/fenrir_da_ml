@@ -22,9 +22,8 @@ class SVGIcon(QWidget):
         self.svg = QSvgWidget(svg_path)
         self.svg.setFixedSize(size, size)
 
-# Примеры SVG (создай файлы или используй base64)
+
 def create_sample_svg():
-    # Здесь можно вставить inline SVG строки или сохранить файлы
     pass
 
 class MainWindow(QMainWindow):
@@ -33,7 +32,6 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("NeoWEKA — Data Analysis & ML Studio")
         self.resize(1400, 900)
         
-        # Темы
         self.is_dark = True
         self.apply_theme()
         
@@ -47,7 +45,6 @@ class MainWindow(QMainWindow):
         
         self.setCentralWidget(tabs)
         
-        # Меню темы
         menu = self.menuBar()
         theme_action = menu.addAction("🌗 Переключить тему")
         theme_action.triggered.connect(self.toggle_theme)
@@ -80,8 +77,7 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(widget)
         layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
         
-        # SVG лого (пример)
-        logo = QSvgWidget()  # Загрузи свой SVG
+        logo = QSvgWidget() 
         logo.setFixedSize(180, 180)
         layout.addWidget(logo)
         
@@ -94,7 +90,6 @@ class MainWindow(QMainWindow):
         desc.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(desc)
         
-        # Пожертвования
         donate_frame = QFrame()
         donate_layout = QHBoxLayout(donate_frame)
         btn_crypto = QPushButton("💰 Поддержать (USDT / BTC)")
@@ -116,7 +111,6 @@ class MainWindow(QMainWindow):
         self.data_info.setReadOnly(True)
         layout.addWidget(self.data_info)
         
-        # Статистика, корреляции и т.д.
         hbox = QHBoxLayout()
         btn_stats = QPushButton("📈 Описательная статистика")
         btn_corr = QPushButton("🔗 Матрица корреляций")
@@ -128,7 +122,6 @@ class MainWindow(QMainWindow):
         hbox.addWidget(btn_ab)
         layout.addLayout(hbox)
         
-        # График
         self.figure = plt.figure()
         self.canvas = FigureCanvas(self.figure)
         layout.addWidget(self.canvas)
@@ -179,8 +172,7 @@ class MainWindow(QMainWindow):
         if self.df is None:
             self.ml_log.setText("Сначала загрузите данные!")
             return
-        # Пример обучения (упрощённо)
-        X = self.df.iloc[:, :-1]  # все кроме последней колонки
+        X = self.df.iloc[:, :-1] 
         y = self.df.iloc[:, -1]
         X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2)
         
@@ -199,7 +191,6 @@ class MainWindow(QMainWindow):
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
-    # Для лучшего blur на Windows/Linux
     app.setStyle("Fusion")
     window = MainWindow()
     window.show()
