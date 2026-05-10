@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128" role="img" aria-label="Fenrir Mining logo">
+  <rect width="128" height="128" rx="24" fill="#15181c"/>
+  <path d="M28 84 39 31l20 18 10-14 9 18 24-12-14 49-23 10-21-4z" fill="#2f9e9e"/>
+  <path d="m45 69 13-10 14 4 13-9-7 23-18 8-17-6z" fill="#edf2f7"/>
+  <path d="m50 68 10 5 17-14-6 18-12 5-11-5z" fill="#15181c"/>
+  <circle cx="74" cy="62" r="3" fill="#f0b429"/>
+</svg>
