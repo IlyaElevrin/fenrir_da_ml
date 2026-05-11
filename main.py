@@ -95,11 +95,13 @@ def themed_svg_icon(name: str, color: str, size: int = 24) -> QIcon:
     return QIcon(pixmap)
 
 
+
 class FenrirMiningWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle(APP_NAME)
         self.resize(1320, 860)
+        self.setMinimumSize(800, 480)
         self.is_dark_theme = True
         self.tables: list[LoadedTable] = []
 
