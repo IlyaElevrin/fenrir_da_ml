@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import sys
+import socket
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -20,10 +22,12 @@ from PyQt6.QtWidgets import (
     QComboBox,
     QDialog,
     QDialogButtonBox,
+    QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
     QFrame,
     QGroupBox,
+    QHeaderView,
     QHBoxLayout,
     QInputDialog,
     QLabel,
@@ -31,14 +35,16 @@ from PyQt6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPushButton,
     QSpinBox,
-    QSplitter,
+    QStackedWidget,
     QTabWidget,
     QTableWidget,
     QTableWidgetItem,
     QTextEdit,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -46,16 +52,29 @@ from PyQt6.QtWidgets import (
 from func.da.ab_testing import run_ab_test
 from func.da.correlation import correlation_matrix
 from func.da.statistics import dataset_overview, describe_columns
+from func.da.visualization import (
+    VISUALIZATION_METHODS,
+    VisualizationConfig,
+    create_dash_app,
+    validate_chart_config,
+)
 from func.io.loaders import (
     SUPPORTED_FILE_EXTENSIONS,
     list_database_tables,
     load_database_table,
     load_table_from_file,
 )
-from func.ml.models import model_options, train_model
+from func.ml.models import (
+    cross_validate_model,
+    model_options,
+    model_parameter_specs,
+    train_model,
+)
 from func.preprocess.preprocessing import (
     JOIN_METHODS,
     MISSING_STRATEGIES,
+    TYPE_CONVERSION_OPTIONS,
+    convert_column_types,
     drop_missing,
     group_table,
     impute_missing,
@@ -64,8 +83,10 @@ from func.preprocess.preprocessing import (
 )
 
 
-APP_NAME = "Fenrir Mining"
+APP_NAME = "Анализ Данных"
+HOME_TITLE = "Фенрир Анализ Данных"
 ASSET_DIR = Path(__file__).resolve().parent / "assets" / "svg"
+LOGO_DIR = Path(__file__).resolve().parent / "assets" / "logo"
 PREVIEW_ROWS = 5
 
 
@@ -77,6 +98,14 @@ class LoadedTable:
 
 def asset_path(name: str) -> Path:
     return ASSET_DIR / f"{name}.svg"
+
+
+def logo_path() -> Path | None:
+    for name in ("logo.png", "logo.svg"):
+        candidate = LOGO_DIR / name
+        if candidate.exists():
+            return candidate
+    return None
 
 
 def themed_svg_icon(name: str, color: str, size: int = 24) -> QIcon:
@@ -131,12 +160,12 @@ class FenrirMiningWindow(QMainWindow):
         self.join_on = QLineEdit()
         self.group_by = QListWidget()
         self.group_aggfunc = QComboBox()
+        self.dtype_table = QTableWidget()
 
         # Analysis widgets
         self.analysis_table = QComboBox()
         self.analysis_columns = QListWidget()
         self.analysis_output = QTextEdit()
-        self.analysis_plot = FigureCanvas(Figure(figsize=(7, 4)))
         self.correlation_method = QComboBox()
         self.ab_group_column = QComboBox()
         self.ab_value_column = QComboBox()
@@ -149,6 +178,24 @@ class FenrirMiningWindow(QMainWindow):
         self.ml_target_column = QComboBox()
         self.ml_model = QComboBox()
         self.ml_output = QTextEdit()
+        self.ml_parameter_stack = QStackedWidget()
+        self.ml_parameter_widgets: dict[str, dict[str, tuple[dict[str, Any], QWidget]]] = {}
+        self.ml_test_size = QDoubleSpinBox()
+        self.ml_random_state = QSpinBox()
+        self.ml_cv_folds = QSpinBox()
+
+        # Visualization widgets
+        self.viz_table = QComboBox()
+        self.viz_method = QComboBox()
+        self.viz_x_column = QComboBox()
+        self.viz_y_column = QComboBox()
+        self.viz_title = QLineEdit()
+        self.viz_plot = FigureCanvas(Figure(figsize=(7, 4)))
+        self.dashboard_title = QLineEdit()
+        self.dashboard_items = QListWidget()
+        self._dashboard_configs: list[VisualizationConfig] = []
+        self._dash_thread: threading.Thread | None = None
+        self._dash_port: int | None = None
 
         self.tabs = self._create_tabs()
         self.setCentralWidget(self.tabs)
@@ -174,6 +221,7 @@ class FenrirMiningWindow(QMainWindow):
                 ("upload", "Загрузка данных", self._create_data_loading_tab),
                 ("columns", "Предобработка", self._create_preprocessing_tab),
                 ("analysis", "Анализ данных", self._create_analysis_tab),
+                ("analysis", "Визуализация", self._create_visualization_tab),
                 ("ml", "Машинное обучение", self._create_ml_tab),
             ]
         ):
@@ -193,20 +241,33 @@ class FenrirMiningWindow(QMainWindow):
         hero_layout.setContentsMargins(28, 28, 28, 28)
         hero_layout.setSpacing(24)
 
-        logo = QSvgWidget(str(asset_path("fenrir-logo")))
+        logo_file = logo_path()
+        if logo_file and logo_file.suffix.lower() == ".svg":
+            logo: QWidget = QSvgWidget(str(logo_file))
+        else:
+            logo_label = QLabel()
+            if logo_file:
+                logo_label.setPixmap(
+                    QPixmap(str(logo_file)).scaled(
+                        132,
+                        132,
+                        Qt.AspectRatioMode.KeepAspectRatio,
+                        Qt.TransformationMode.SmoothTransformation,
+                    )
+                )
+            logo_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            logo = logo_label
         logo.setFixedSize(132, 132)
         hero_layout.addWidget(logo)
 
         text_box = QVBoxLayout()
-        title = QLabel(APP_NAME)
+        title = QLabel(HOME_TITLE)
         title.setObjectName("Title")
         description = QLabel(
-            "Fenrir Mining — кросс-платформенная среда для интеллектуального анализа "
-            "данных и базового машинного обучения. Программа объединяет загрузку "
-            "табличных данных из файлов и баз, предобработку (удаление и заполнение "
-            "пропусков, сводные таблицы, объединение и группировка), статистический "
-            "анализ, корреляции, A/B-тесты и обучение классических моделей "
-            "scikit-learn в едином интерфейсе."
+            "Кросс-платформенная среда для анализа данных и базового машинного "
+            "обучения. Программа объединяет загрузку табличных данных из файлов и "
+            "баз, предобработку, статистический анализ, визуализацию, Dash dashboard "
+            "и обучение классических моделей scikit-learn в едином интерфейсе."
         )
         description.setWordWrap(True)
         description.setObjectName("BodyText")
@@ -297,6 +358,7 @@ class FenrirMiningWindow(QMainWindow):
         controls_layout.addWidget(_field_label("Имя результирующей таблицы"))
         controls_layout.addWidget(self.prep_output_name)
 
+        controls_layout.addWidget(_section_label("Метод предобработки"))
         missing_group = QGroupBox("Пропущенные значения")
         missing_layout = QFormLayout(missing_group)
         self.prep_strategy.addItems(list(MISSING_STRATEGIES))
@@ -311,7 +373,17 @@ class FenrirMiningWindow(QMainWindow):
         missing_button = QPushButton("Обработать пропуски")
         missing_button.clicked.connect(self.apply_missing_strategy)
         missing_layout.addRow(missing_button)
-        controls_layout.addWidget(missing_group)
+
+        dtype_group = QGroupBox("Преобразование типов")
+        dtype_layout = QVBoxLayout(dtype_group)
+        self.dtype_table.setColumnCount(3)
+        self.dtype_table.setHorizontalHeaderLabels(["Столбец", "Текущий тип", "Новый тип"])
+        self.dtype_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.dtype_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        dtype_layout.addWidget(self.dtype_table)
+        dtype_button = QPushButton("Преобразовать типы")
+        dtype_button.clicked.connect(self.apply_type_conversions)
+        dtype_layout.addWidget(dtype_button)
 
         pivot_group = QGroupBox("Сводная таблица")
         pivot_layout = QFormLayout(pivot_group)
@@ -349,7 +421,18 @@ class FenrirMiningWindow(QMainWindow):
         group_button = QPushButton("Сгруппировать таблицу")
         group_button.clicked.connect(self.apply_group)
         group_layout.addRow(group_button)
-        controls_layout.addWidget(group_group)
+
+        method_button, method_stack = _create_method_selector(
+            [
+                ("Пропущенные значения", missing_group),
+                ("Преобразование типов", dtype_group),
+                ("Сводная таблица", pivot_group),
+                ("Объединение таблиц", join_group),
+                ("Группировка", group_group),
+            ]
+        )
+        controls_layout.addWidget(method_button)
+        controls_layout.addWidget(method_stack)
 
         controls_layout.addStretch(1)
         layout.addWidget(controls)
@@ -387,46 +470,107 @@ class FenrirMiningWindow(QMainWindow):
         select_numeric.clicked.connect(self.select_numeric_analysis_columns)
         controls_layout.addWidget(select_numeric)
 
+        controls_layout.addWidget(_section_label("Метод анализа"))
+        stats_group = QGroupBox("Описательная статистика")
+        stats_layout = QVBoxLayout(stats_group)
         stats_button = QPushButton("Описательная статистика")
         self._register_icon(stats_button.setIcon, "stats")
         stats_button.clicked.connect(self.show_descriptive_statistics)
-        controls_layout.addWidget(stats_button)
+        stats_layout.addWidget(stats_button)
 
+        corr_group = QGroupBox("Корреляция")
+        corr_layout = QFormLayout(corr_group)
         self.correlation_method.addItems(["pearson", "spearman", "kendall"])
-        controls_layout.addWidget(_field_label("Метод корреляции"))
-        controls_layout.addWidget(self.correlation_method)
+        corr_layout.addRow("Метод:", self.correlation_method)
 
         corr_button = QPushButton("Матрица корреляций")
         self._register_icon(corr_button.setIcon, "correlation")
         corr_button.clicked.connect(self.show_correlation)
-        controls_layout.addWidget(corr_button)
+        corr_layout.addRow(corr_button)
 
-        controls_layout.addSpacing(12)
-        controls_layout.addWidget(_section_label("A/B тест"))
-        controls_layout.addWidget(_field_label("Группирующий столбец"))
-        controls_layout.addWidget(self.ab_group_column)
-        controls_layout.addWidget(_field_label("Метрика"))
-        controls_layout.addWidget(self.ab_value_column)
-        controls_layout.addWidget(_field_label("Контроль"))
-        controls_layout.addWidget(self.ab_control_value)
-        controls_layout.addWidget(_field_label("Вариант"))
-        controls_layout.addWidget(self.ab_treatment_value)
+        ab_group = QGroupBox("A/B тест")
+        ab_layout = QFormLayout(ab_group)
+        ab_layout.addRow("Группирующий столбец:", self.ab_group_column)
+        ab_layout.addRow("Метрика:", self.ab_value_column)
+        ab_layout.addRow("Контроль:", self.ab_control_value)
+        ab_layout.addRow("Вариант:", self.ab_treatment_value)
 
         ab_button = QPushButton("Запустить A/B тест")
         self._register_icon(ab_button.setIcon, "ab-test")
         ab_button.clicked.connect(self.show_ab_test)
-        controls_layout.addWidget(ab_button)
+        ab_layout.addRow(ab_button)
+
+        method_button, method_stack = _create_method_selector(
+            [
+                ("Описательная статистика", stats_group),
+                ("Корреляция", corr_group),
+                ("A/B тест", ab_group),
+            ]
+        )
+        controls_layout.addWidget(method_button)
+        controls_layout.addWidget(method_stack)
         controls_layout.addStretch(1)
 
-        results = QSplitter(Qt.Orientation.Vertical)
         self.analysis_output.setReadOnly(True)
         self.analysis_output.setPlaceholderText("Загрузите данные и выберите действие.")
-        results.addWidget(self.analysis_output)
-        results.addWidget(self.analysis_plot)
-        results.setSizes([300, 420])
 
         layout.addWidget(controls)
-        layout.addWidget(results, stretch=1)
+        layout.addWidget(self.analysis_output, stretch=1)
+        return page
+
+    def _create_visualization_tab(self) -> QWidget:
+        page = QWidget()
+        layout = QHBoxLayout(page)
+        layout.setContentsMargins(24, 24, 24, 24)
+        layout.setSpacing(18)
+
+        controls = QFrame()
+        controls.setObjectName("Panel")
+        controls.setMinimumWidth(340)
+        controls_layout = QVBoxLayout(controls)
+
+        controls_layout.addWidget(_section_label("Таблица для визуализации"))
+        controls_layout.addWidget(self.viz_table)
+
+        controls_layout.addWidget(_section_label("График"))
+        for key, label in VISUALIZATION_METHODS.items():
+            self.viz_method.addItem(label, key)
+        controls_layout.addWidget(_field_label("Тип графика"))
+        controls_layout.addWidget(self.viz_method)
+        controls_layout.addWidget(_field_label("X / категории"))
+        controls_layout.addWidget(self.viz_x_column)
+        controls_layout.addWidget(_field_label("Y / значения"))
+        controls_layout.addWidget(self.viz_y_column)
+        self.viz_title.setPlaceholderText("Заголовок")
+        controls_layout.addWidget(self.viz_title)
+
+        render_button = QPushButton("Построить график")
+        self._register_icon(render_button.setIcon, "analysis")
+        render_button.clicked.connect(self.render_visualization)
+        controls_layout.addWidget(render_button)
+
+        controls_layout.addSpacing(12)
+        controls_layout.addWidget(_section_label("Dash dashboard"))
+        self.dashboard_title.setText("Анализ Данных Dashboard")
+        controls_layout.addWidget(self.dashboard_title)
+        add_dashboard_button = QPushButton("Добавить график")
+        add_dashboard_button.clicked.connect(self.add_dashboard_visualization)
+        controls_layout.addWidget(add_dashboard_button)
+        self.dashboard_items.setMaximumHeight(120)
+        controls_layout.addWidget(self.dashboard_items)
+        launch_dashboard_button = QPushButton("Запустить Dash dashboard")
+        launch_dashboard_button.clicked.connect(self.start_dash_dashboard)
+        controls_layout.addWidget(launch_dashboard_button)
+        controls_layout.addStretch(1)
+
+        plot_panel = QFrame()
+        plot_panel.setObjectName("Panel")
+        plot_layout = QVBoxLayout(plot_panel)
+        plot_layout.addWidget(_section_label("Предпросмотр"))
+        plot_layout.addWidget(self.viz_plot, stretch=1)
+
+        layout.addWidget(controls)
+        layout.addWidget(plot_panel, stretch=1)
         return page
 
     def _create_ml_tab(self) -> QWidget:
@@ -448,6 +592,9 @@ class FenrirMiningWindow(QMainWindow):
             self.ml_model.addItem(label, key)
         controls_layout.addWidget(_field_label("Алгоритм"))
         controls_layout.addWidget(self.ml_model)
+        self._build_ml_parameter_pages()
+        controls_layout.addWidget(_section_label("Параметры модели"))
+        controls_layout.addWidget(self.ml_parameter_stack)
 
         controls_layout.addWidget(_field_label("Признаки"))
         self.ml_feature_columns.setSelectionMode(QAbstractItemView.SelectionMode.MultiSelection)
@@ -456,10 +603,40 @@ class FenrirMiningWindow(QMainWindow):
         controls_layout.addWidget(_field_label("Целевой столбец"))
         controls_layout.addWidget(self.ml_target_column)
 
+        controls_layout.addWidget(_section_label("Метод машинного обучения"))
+        training_group = QGroupBox("Обучение модели")
+        training_layout = QFormLayout(training_group)
+        self.ml_test_size.setRange(0.1, 0.5)
+        self.ml_test_size.setSingleStep(0.05)
+        self.ml_test_size.setDecimals(2)
+        self.ml_test_size.setValue(0.25)
+        self.ml_random_state.setRange(0, 1_000_000)
+        self.ml_random_state.setValue(42)
+        training_layout.addRow("Доля теста:", self.ml_test_size)
+        training_layout.addRow("Random state:", self.ml_random_state)
         train_button = QPushButton("Обучить модель")
         self._register_icon(train_button.setIcon, "train")
         train_button.clicked.connect(self.train_selected_model)
-        controls_layout.addWidget(train_button)
+        training_layout.addRow(train_button)
+
+        validation_group = QGroupBox("Кросс-валидация")
+        validation_layout = QFormLayout(validation_group)
+        self.ml_cv_folds.setRange(2, 20)
+        self.ml_cv_folds.setValue(5)
+        validation_layout.addRow("Количество фолдов:", self.ml_cv_folds)
+        validate_button = QPushButton("Запустить кросс-валидацию")
+        self._register_icon(validate_button.setIcon, "stats")
+        validate_button.clicked.connect(self.validate_selected_model)
+        validation_layout.addRow(validate_button)
+
+        method_button, method_stack = _create_method_selector(
+            [
+                ("Обучение модели", training_group),
+                ("Кросс-валидация", validation_group),
+            ]
+        )
+        controls_layout.addWidget(method_button)
+        controls_layout.addWidget(method_stack)
         controls_layout.addStretch(1)
 
         self.ml_output.setReadOnly(True)
@@ -475,7 +652,10 @@ class FenrirMiningWindow(QMainWindow):
         self.prep_source_table.currentIndexChanged.connect(self._refresh_prep_columns)
         self.analysis_table.currentIndexChanged.connect(self._refresh_analysis_columns)
         self.ml_table.currentIndexChanged.connect(self._refresh_ml_columns)
+        self.ml_model.currentIndexChanged.connect(self._refresh_ml_parameter_page)
         self.ab_group_column.currentTextChanged.connect(self._refresh_ab_values)
+        self.viz_table.currentIndexChanged.connect(self._refresh_visualization_columns)
+        self.viz_method.currentIndexChanged.connect(self._refresh_visualization_defaults)
 
     # ----- Theme & icons -----------------------------------------------
 
@@ -608,6 +788,7 @@ class FenrirMiningWindow(QMainWindow):
         self._refresh_combo(self.prep_source_table, names, preserve=True)
         self._refresh_combo(self.analysis_table, names, preserve=True)
         self._refresh_combo(self.ml_table, names, preserve=True)
+        self._refresh_combo(self.viz_table, names, preserve=True)
         self._refresh_combo(self.join_left, names, preserve=True)
         self._refresh_combo(self.join_right, names, preserve=True)
 
@@ -615,6 +796,7 @@ class FenrirMiningWindow(QMainWindow):
         self._refresh_prep_columns()
         self._refresh_analysis_columns()
         self._refresh_ml_columns()
+        self._refresh_visualization_columns()
 
     def _refresh_table_summary(self) -> None:
         if not self.tables:
@@ -680,6 +862,7 @@ class FenrirMiningWindow(QMainWindow):
         self._populate_list(self.pivot_columns, columns)
         self._populate_list(self.pivot_values, columns)
         self._populate_list(self.group_by, columns)
+        self._refresh_dtype_table()
 
     def _populate_list(self, widget: QListWidget, items: list[str], *, select_all: bool = False) -> None:
         widget.clear()
@@ -691,6 +874,25 @@ class FenrirMiningWindow(QMainWindow):
 
     def _log_preprocessing(self, message: str) -> None:
         self.prep_log.append(message)
+
+    def _refresh_dtype_table(self) -> None:
+        table = self._selected_table(self.prep_source_table)
+        if table is None:
+            self.dtype_table.setRowCount(0)
+            return
+
+        columns = [str(column) for column in table.frame.columns]
+        self.dtype_table.setRowCount(len(columns))
+        for row, column in enumerate(columns):
+            current_dtype = str(table.frame[column].dtype)
+            self.dtype_table.setItem(row, 0, QTableWidgetItem(column))
+            self.dtype_table.setItem(row, 1, QTableWidgetItem(current_dtype))
+
+            dtype_selector = QComboBox()
+            dtype_selector.addItems(list(TYPE_CONVERSION_OPTIONS))
+            dtype_selector.setCurrentText(_dtype_option_for_series(table.frame[column]))
+            self.dtype_table.setCellWidget(row, 2, dtype_selector)
+        self.dtype_table.resizeRowsToContents()
 
     def apply_missing_strategy(self) -> None:
         table = self._selected_table(self.prep_source_table)
@@ -713,6 +915,27 @@ class FenrirMiningWindow(QMainWindow):
             self.show_error("Не удалось обработать пропуски", exc)
             return
         self._publish_result_table(f"{table.name}_{strategy}", new_frame, "пропуски")
+
+    def apply_type_conversions(self) -> None:
+        table = self._selected_table(self.prep_source_table)
+        if table is None:
+            self.show_error("Нет данных", RuntimeError("Выберите таблицу для преобразования типов."))
+            return
+
+        conversions: dict[str, str] = {}
+        for row in range(self.dtype_table.rowCount()):
+            column_item = self.dtype_table.item(row, 0)
+            dtype_selector = self.dtype_table.cellWidget(row, 2)
+            if column_item is None or not isinstance(dtype_selector, QComboBox):
+                continue
+            conversions[column_item.text()] = dtype_selector.currentText()
+
+        try:
+            new_frame = convert_column_types(table.frame, conversions)
+        except Exception as exc:
+            self.show_error("Не удалось преобразовать типы", exc)
+            return
+        self._publish_result_table(f"{table.name}_types", new_frame, "преобразование типов")
 
     def apply_pivot_table(self) -> None:
         table = self._selected_table(self.prep_source_table)
@@ -848,7 +1071,6 @@ class FenrirMiningWindow(QMainWindow):
                 f"пропусков: {sum(overview.missing_by_column.values())}\n\n"
             )
             self.analysis_output.setText(header + summary_frame.round(4).to_string())
-            self._draw_distribution(table.frame, columns)
         except Exception as exc:
             self.show_error("Не удалось посчитать статистику", exc)
 
@@ -862,7 +1084,6 @@ class FenrirMiningWindow(QMainWindow):
                 table.frame, columns, method=self.correlation_method.currentText()
             )
             self.analysis_output.setText(matrix.round(4).to_string())
-            self._draw_correlation(matrix)
         except Exception as exc:
             self.show_error("Не удалось построить корреляцию", exc)
 
@@ -894,45 +1115,179 @@ class FenrirMiningWindow(QMainWindow):
                     ]
                 )
             )
-            self._draw_ab_test(result)
         except Exception as exc:
             self.show_error("Не удалось выполнить A/B тест", exc)
 
-    def _draw_distribution(self, frame: pd.DataFrame, columns: list[str]) -> None:
-        numeric = frame.loc[:, columns].select_dtypes(include="number") if columns else frame.select_dtypes(include="number")
-        self.analysis_plot.figure.clear()
-        axes = self.analysis_plot.figure.add_subplot(111)
-        if numeric.empty:
-            axes.text(0.5, 0.5, "Нет числовых столбцов", ha="center", va="center")
-        else:
-            numeric.plot(kind="box", ax=axes)
-            axes.set_title("Распределение выбранных числовых столбцов")
-            axes.tick_params(axis="x", rotation=25)
-        self.analysis_plot.figure.tight_layout()
-        self.analysis_plot.draw()
+    # ----- Visualization ----------------------------------------------
 
-    def _draw_correlation(self, matrix: pd.DataFrame) -> None:
-        self.analysis_plot.figure.clear()
-        axes = self.analysis_plot.figure.add_subplot(111)
-        sns.heatmap(matrix, annot=True, cmap="vlag", center=0, ax=axes)
-        axes.set_title("Матрица корреляций")
-        self.analysis_plot.figure.tight_layout()
-        self.analysis_plot.draw()
+    def _refresh_visualization_columns(self) -> None:
+        table = self._selected_table(self.viz_table)
+        columns = [str(column) for column in table.frame.columns] if table else []
+        self._refresh_combo(self.viz_x_column, columns, preserve=False)
+        self._refresh_combo(self.viz_y_column, columns, preserve=False)
+        self._refresh_visualization_defaults()
 
-    def _draw_ab_test(self, result: Any) -> None:
-        self.analysis_plot.figure.clear()
-        axes = self.analysis_plot.figure.add_subplot(111)
-        axes.bar(
-            [result.control_value, result.treatment_value],
-            [result.control_mean, result.treatment_mean],
-            color=["#2f9e9e", "#f0b429"],
+    def _refresh_visualization_defaults(self) -> None:
+        table = self._selected_table(self.viz_table)
+        if table is None:
+            return
+        columns = [str(column) for column in table.frame.columns]
+        numeric = [str(column) for column in table.frame.select_dtypes(include="number").columns]
+        chart_type = self.viz_method.currentData()
+        if chart_type in {"line", "bar", "scatter"}:
+            if columns:
+                self.viz_x_column.setCurrentText(columns[0])
+            if numeric:
+                self.viz_y_column.setCurrentText(numeric[0])
+        elif chart_type == "pie":
+            categorical = [column for column in columns if column not in numeric]
+            if categorical:
+                self.viz_x_column.setCurrentText(categorical[0])
+            if numeric:
+                self.viz_y_column.setCurrentText(numeric[0])
+        elif chart_type in {"histogram", "box"} and numeric:
+            self.viz_x_column.setCurrentText(numeric[0])
+            self.viz_y_column.setCurrentText(numeric[0])
+
+    def _current_visualization_config(self) -> VisualizationConfig:
+        chart_type = self.viz_method.currentData()
+        title = self.viz_title.text().strip() or None
+        if chart_type == "heatmap":
+            return VisualizationConfig(chart_type=chart_type, title=title)
+        if chart_type == "box":
+            return VisualizationConfig(
+                chart_type=chart_type,
+                y_column=self.viz_y_column.currentText() or self.viz_x_column.currentText(),
+                title=title,
+            )
+        return VisualizationConfig(
+            chart_type=chart_type,
+            x_column=self.viz_x_column.currentText() or None,
+            y_column=self.viz_y_column.currentText() or None,
+            title=title,
         )
-        axes.set_ylabel(result.value_column)
-        axes.set_title("Средние значения групп")
-        self.analysis_plot.figure.tight_layout()
-        self.analysis_plot.draw()
+
+    def render_visualization(self) -> None:
+        table = self._selected_table(self.viz_table)
+        if table is None:
+            self.show_error("Нет данных", RuntimeError("Загрузите хотя бы одну таблицу."))
+            return
+        config = self._current_visualization_config()
+        try:
+            validate_chart_config(table.frame, config)
+            self._draw_visualization(table.frame, config)
+        except Exception as exc:
+            self.show_error("Не удалось построить график", exc)
+
+    def add_dashboard_visualization(self) -> None:
+        table = self._selected_table(self.viz_table)
+        if table is None:
+            self.show_error("Нет данных", RuntimeError("Загрузите хотя бы одну таблицу."))
+            return
+        config = self._current_visualization_config()
+        try:
+            validate_chart_config(table.frame, config)
+        except Exception as exc:
+            self.show_error("Не удалось добавить график", exc)
+            return
+        self._dashboard_configs.append(config)
+        label = config.title or VISUALIZATION_METHODS[config.chart_type]
+        self.dashboard_items.addItem(f"{len(self._dashboard_configs)}. {label}")
+
+    def start_dash_dashboard(self) -> None:
+        table = self._selected_table(self.viz_table)
+        if table is None:
+            self.show_error("Нет данных", RuntimeError("Загрузите хотя бы одну таблицу."))
+            return
+        if not self._dashboard_configs:
+            self.add_dashboard_visualization()
+            if not self._dashboard_configs:
+                return
+        if self._dash_thread and self._dash_thread.is_alive() and self._dash_port:
+            QMessageBox.information(
+                self,
+                "Dash dashboard",
+                f"Dashboard уже запущен: http://127.0.0.1:{self._dash_port}/",
+            )
+            return
+        try:
+            app = create_dash_app(
+                table.frame,
+                self._dashboard_configs,
+                self.dashboard_title.text().strip() or "Анализ Данных Dashboard",
+            )
+            self._dash_port = _free_port()
+            self._dash_thread = threading.Thread(
+                target=lambda: app.run(
+                    host="127.0.0.1",
+                    port=self._dash_port,
+                    debug=False,
+                    use_reloader=False,
+                ),
+                daemon=True,
+            )
+            self._dash_thread.start()
+        except Exception as exc:
+            self.show_error("Не удалось запустить Dash dashboard", exc)
+            return
+        QMessageBox.information(
+            self,
+            "Dash dashboard",
+            f"Dashboard запущен: http://127.0.0.1:{self._dash_port}/",
+        )
+
+    def _draw_visualization(self, frame: pd.DataFrame, config: VisualizationConfig) -> None:
+        self.viz_plot.figure.clear()
+        axes = self.viz_plot.figure.add_subplot(111)
+        title = config.title or VISUALIZATION_METHODS[config.chart_type]
+        if config.chart_type == "line":
+            frame.plot(kind="line", x=config.x_column, y=config.y_column, ax=axes)
+        elif config.chart_type == "bar":
+            frame.plot(kind="bar", x=config.x_column, y=config.y_column, ax=axes)
+        elif config.chart_type == "pie":
+            if config.x_column and config.y_column:
+                data = frame.groupby(config.x_column, dropna=False)[config.y_column].sum()
+            else:
+                column = config.x_column or config.y_column
+                data = frame[column].value_counts(dropna=False)
+            data.plot(kind="pie", autopct="%1.1f%%", ax=axes)
+            axes.set_ylabel("")
+        elif config.chart_type == "heatmap":
+            matrix = frame.select_dtypes(include="number").corr()
+            sns.heatmap(matrix, annot=True, cmap="Greys", center=0, ax=axes)
+        elif config.chart_type == "scatter":
+            axes.scatter(frame[config.x_column], frame[config.y_column], color="#000000")
+            axes.set_xlabel(config.x_column)
+            axes.set_ylabel(config.y_column)
+        elif config.chart_type == "histogram":
+            column = config.x_column or config.y_column
+            frame[column].plot(kind="hist", bins=20, color="#000000", ax=axes)
+            axes.set_xlabel(column)
+        elif config.chart_type == "box":
+            column = config.y_column or config.x_column
+            frame[[column]].plot(kind="box", ax=axes)
+        axes.set_title(title)
+        axes.tick_params(axis="x", rotation=25)
+        self.viz_plot.figure.tight_layout()
+        self.viz_plot.draw()
 
     # ----- Machine learning --------------------------------------------
+
+    def _build_ml_parameter_pages(self) -> None:
+        for key in model_options():
+            page = QWidget()
+            form = QFormLayout(page)
+            self.ml_parameter_widgets[key] = {}
+            for spec in model_parameter_specs(key):
+                editor = _parameter_editor(spec)
+                form.addRow(f"{spec['label']}:", editor)
+                self.ml_parameter_widgets[key][spec["name"]] = (spec, editor)
+            self.ml_parameter_stack.addWidget(page)
+        self._refresh_ml_parameter_page()
+
+    def _refresh_ml_parameter_page(self) -> None:
+        index = max(0, self.ml_model.currentIndex())
+        self.ml_parameter_stack.setCurrentIndex(index)
 
     def _refresh_ml_columns(self) -> None:
         table = self._selected_table(self.ml_table)
@@ -946,6 +1301,14 @@ class FenrirMiningWindow(QMainWindow):
                     item.setSelected(True)
             self.ml_target_column.setCurrentText(columns[-1])
 
+    def _selected_ml_model_params(self) -> dict[str, Any]:
+        model_name = self.ml_model.currentData()
+        widgets = self.ml_parameter_widgets.get(model_name, {})
+        params: dict[str, Any] = {}
+        for name, (spec, editor) in widgets.items():
+            params[name] = _parameter_value(spec, editor)
+        return params
+
     def train_selected_model(self) -> None:
         table = self._require_ml_table()
         if table is None:
@@ -958,6 +1321,9 @@ class FenrirMiningWindow(QMainWindow):
                 model_name=self.ml_model.currentData(),
                 feature_columns=features,
                 target_column=target,
+                random_state=self.ml_random_state.value(),
+                test_size=self.ml_test_size.value(),
+                model_params=self._selected_ml_model_params(),
             )
             self.ml_output.setText(
                 "\n".join(
@@ -977,6 +1343,44 @@ class FenrirMiningWindow(QMainWindow):
             )
         except Exception as exc:
             self.show_error("Не удалось обучить модель", exc)
+
+    def validate_selected_model(self) -> None:
+        table = self._require_ml_table()
+        if table is None:
+            return
+        target = self.ml_target_column.currentText()
+        features = [column for column in self._list_selected_items(self.ml_feature_columns) if column != target]
+        try:
+            result = cross_validate_model(
+                table.frame,
+                model_name=self.ml_model.currentData(),
+                feature_columns=features,
+                target_column=target,
+                cv_folds=self.ml_cv_folds.value(),
+                random_state=self.ml_random_state.value(),
+                model_params=self._selected_ml_model_params(),
+            )
+            self.ml_output.setText(
+                "\n".join(
+                    [
+                        f"Кросс-валидация: {model_options()[result.model_name]}",
+                        f"Таблица: {table.name}",
+                        f"Целевой столбец: {result.target_column}",
+                        f"Метрика: {result.metric}",
+                        f"Фолдов: {result.fold_count}",
+                        f"Средний score: {result.mean_score:.4f}",
+                        f"Стандартное отклонение: {result.std_score:.4f}",
+                        "",
+                        "Scores по фолдам:",
+                        ", ".join(f"{score:.4f}" for score in result.fold_scores),
+                        "",
+                        "Использованные признаки:",
+                        ", ".join(result.feature_names),
+                    ]
+                )
+            )
+        except Exception as exc:
+            self.show_error("Не удалось выполнить кросс-валидацию", exc)
 
     # ----- Helpers -----------------------------------------------------
 
@@ -1034,6 +1438,97 @@ def _field_label(text: str) -> QLabel:
     return label
 
 
+def _create_method_selector(entries: list[tuple[str, QWidget]]) -> tuple[QToolButton, QStackedWidget]:
+    button = QToolButton()
+    button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+    button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+    button.setMinimumHeight(36)
+    menu = QMenu(button)
+    stack = QStackedWidget()
+
+    def select_method(index: int, title: str) -> None:
+        stack.setCurrentIndex(index)
+        button.setText(title)
+
+    for index, (title, widget) in enumerate(entries):
+        stack.addWidget(widget)
+        action = menu.addAction(title)
+        action.triggered.connect(
+            lambda _checked=False, selected=index, name=title: select_method(selected, name)
+        )
+    button.setMenu(menu)
+    if entries:
+        select_method(0, entries[0][0])
+    return button, stack
+
+
+def _dtype_option_for_series(series: pd.Series) -> str:
+    dtype = series.dtype
+    if isinstance(dtype, pd.CategoricalDtype):
+        return "category"
+    if pd.api.types.is_bool_dtype(dtype):
+        return "boolean"
+    if pd.api.types.is_integer_dtype(dtype):
+        return "integer"
+    if pd.api.types.is_float_dtype(dtype):
+        return "float"
+    if pd.api.types.is_datetime64_any_dtype(dtype):
+        return "datetime"
+    return "string"
+
+
+def _parameter_editor(spec: dict[str, Any]) -> QWidget:
+    kind = spec["type"]
+    if kind == "choice":
+        editor = QComboBox()
+        for option in spec["options"]:
+            label = "None" if option is None else str(option)
+            editor.addItem(label, option)
+        default_index = editor.findData(spec["default"])
+        if default_index >= 0:
+            editor.setCurrentIndex(default_index)
+        return editor
+    if kind in {"int", "optional_int"}:
+        editor = QSpinBox()
+        editor.setRange(int(spec["min"]), int(spec["max"]))
+        editor.setValue(0 if spec["default"] is None else int(spec["default"]))
+        return editor
+    if kind == "float":
+        editor = QDoubleSpinBox()
+        editor.setRange(float(spec["min"]), float(spec["max"]))
+        editor.setSingleStep(float(spec["step"]))
+        editor.setDecimals(3)
+        editor.setValue(float(spec["default"]))
+        return editor
+    if kind == "bool":
+        editor = QCheckBox()
+        editor.setChecked(bool(spec["default"]))
+        return editor
+    raise ValueError(f"Unsupported parameter editor type: {kind}")
+
+
+def _parameter_value(spec: dict[str, Any], editor: QWidget) -> Any:
+    kind = spec["type"]
+    if kind == "choice" and isinstance(editor, QComboBox):
+        return editor.currentData()
+    if kind == "optional_int" and isinstance(editor, QSpinBox):
+        value = editor.value()
+        return None if value == 0 else value
+    if kind == "int" and isinstance(editor, QSpinBox):
+        return editor.value()
+    if kind == "float" and isinstance(editor, QDoubleSpinBox):
+        return editor.value()
+    if kind == "bool" and isinstance(editor, QCheckBox):
+        return editor.isChecked()
+    raise TypeError(f"Unsupported parameter widget for {spec['name']}")
+
+
+def _free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
 def _dark_stylesheet() -> str:
     return """
         QMainWindow, QWidget {
@@ -1083,16 +1578,17 @@ def _dark_stylesheet() -> str:
         QLabel#BodyText {
             color: #d8dee9;
         }
-        QPushButton {
-            background: #2f9e9e;
+        QPushButton, QToolButton {
+            background: #000000;
             color: #ffffff;
             border: 0;
             border-radius: 6px;
             padding: 9px 12px;
+            min-height: 18px;
             font-weight: 600;
         }
-        QPushButton:hover {
-            background: #268989;
+        QPushButton:hover, QToolButton:hover {
+            background: #171717;
         }
         QTabBar::tab {
             background: #20252b;
@@ -1103,7 +1599,7 @@ def _dark_stylesheet() -> str:
             margin-right: 2px;
         }
         QTabBar::tab:selected {
-            background: #2f9e9e;
+            background: #000000;
             color: #ffffff;
         }
         QHeaderView::section {
@@ -1115,7 +1611,7 @@ def _dark_stylesheet() -> str:
         QTableWidget {
             gridline-color: #303843;
             alternate-background-color: #252c34;
-            selection-background-color: #2f9e9e;
+            selection-background-color: #000000;
             selection-color: #ffffff;
         }
         QTableWidget::item {
@@ -1170,16 +1666,17 @@ def _light_stylesheet() -> str:
         QLabel#BodyText {
             color: #1d2630;
         }
-        QPushButton {
-            background: #006d77;
+        QPushButton, QToolButton {
+            background: #000000;
             color: #ffffff;
             border: 0;
             border-radius: 6px;
             padding: 9px 12px;
+            min-height: 18px;
             font-weight: 600;
         }
-        QPushButton:hover {
-            background: #005a63;
+        QPushButton:hover, QToolButton:hover {
+            background: #171717;
         }
         QTabBar::tab {
             background: #e9edf2;
@@ -1190,7 +1687,7 @@ def _light_stylesheet() -> str:
             margin-right: 2px;
         }
         QTabBar::tab:selected {
-            background: #006d77;
+            background: #000000;
             color: #ffffff;
         }
         QHeaderView::section {
@@ -1202,7 +1699,7 @@ def _light_stylesheet() -> str:
         QTableWidget {
             gridline-color: #d6dde5;
             alternate-background-color: #f3f6f9;
-            selection-background-color: #006d77;
+            selection-background-color: #000000;
             selection-color: #ffffff;
         }
     """

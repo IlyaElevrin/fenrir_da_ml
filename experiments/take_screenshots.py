@@ -31,7 +31,7 @@ def main() -> None:
 
     screenshots = ROOT / "docs" / "screenshots"
 
-    tab_names = ("home", "loading", "preprocessing", "analysis", "ml")
+    tab_names = ("home", "loading", "preprocessing", "analysis", "visualization", "ml")
     for index, name in enumerate(tab_names):
         window.tabs.setCurrentIndex(index)
         app.processEvents()
