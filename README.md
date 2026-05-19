@@ -1,15 +1,16 @@
-# Fenrir Mining
+# Анализ Данных
 
-Fenrir Mining is a cross-platform desktop application for data analysis and basic machine learning. It loads CSV and Excel tables, previews the first five rows, offers statistical/correlation/A-B analysis, and trains starter scikit-learn models from selected columns.
+Анализ Данных is a cross-platform desktop application for data analysis and basic machine learning. It loads CSV and Excel tables, previews the first five rows, offers statistical/correlation/A-B analysis, visualization, Dash dashboards, and trains starter scikit-learn models from selected columns.
 
 ## Возможности
 
-- Главная вкладка: описание программы.
+- Главная вкладка: название "Фенрир Анализ Данных" и логотип из `assets/logo/`.
 - Загрузка данных: чтение CSV, XLSX, TXT, Parquet файлов, подключение к базе данных (SQLite/SQLAlchemy URI), одновременная работа с несколькими таблицами и предпросмотр первых пяти строк выбранной таблицы.
-- Предобработка данных: удаление пропусков или их заполнение средним, медианой или методом KNN, построение сводных таблиц, объединение таблиц различными join-методами и группировка с агрегациями.
-- Анализ данных: выбор столбцов, описательная статистика, корреляции Pearson/Spearman/Kendall и Welch A/B test.
-- Машинное обучение: конструкторы Decision Tree, Random Forest, Logistic Regression и Linear Regression.
-- Переключение светлой и темной темы с автоматической перекраской SVG-иконок (чёрные на светлой теме, белые на тёмной).
+- Предобработка данных: всплывающее меню методов, удаление пропусков или их заполнение средним, медианой или методом KNN, преобразование типов данных по каждому столбцу, построение сводных таблиц, объединение таблиц различными join-методами и группировка с агрегациями.
+- Анализ данных: всплывающее меню методов, выбор столбцов, описательная статистика, корреляции Pearson/Spearman/Kendall и Welch A/B test.
+- Визуализация: line graph, bar chart, pie chart, heat map, scatter plot, histogram, box with mustache и сборка Dash dashboard.
+- Машинное обучение: всплывающее меню методов, конструкторы Decision Tree, Random Forest, Logistic Regression и Linear Regression, расширенные параметры моделей и кросс-валидация.
+- Переключение светлой и темной темы с автоматической перекраской SVG-иконок (чёрные на светлой теме, белые на тёмной) и чёрным акцентным цветом интерфейса.
 
 ## Структура
 
