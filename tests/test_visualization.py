@@ -1,10 +1,13 @@
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import pandas as pd
 
 from func.da.visualization import (
     VISUALIZATION_METHODS,
     VisualizationConfig,
+    save_visualization_png,
     validate_chart_config,
 )
 
@@ -38,6 +41,22 @@ class VisualizationTests(unittest.TestCase):
                 self.frame,
                 VisualizationConfig("line", x_column="date", y_column="missing"),
             )
+
+    def test_save_visualization_png_writes_selected_chart(self):
+        with TemporaryDirectory() as directory:
+            output = Path(directory) / "selected_scatter"
+
+            saved_path = save_visualization_png(
+                self.frame,
+                VisualizationConfig("scatter", x_column="clicks", y_column="revenue"),
+                output,
+            )
+
+            self.assertEqual(saved_path.suffix, ".png")
+            self.assertTrue(saved_path.exists())
+            self.assertGreater(saved_path.stat().st_size, 1000)
+            with saved_path.open("rb") as image:
+                self.assertEqual(image.read(8), b"\x89PNG\r\n\x1a\n")
 
 
 if __name__ == "__main__":
