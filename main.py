@@ -1,14 +1,11 @@
 from __future__ import annotations
 
 import sys
-import socket
-import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
 import pandas as pd
-import seaborn as sns
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 from PyQt6.QtCore import Qt, QByteArray, QSize
@@ -55,7 +52,8 @@ from func.da.statistics import dataset_overview, describe_columns
 from func.da.visualization import (
     VISUALIZATION_METHODS,
     VisualizationConfig,
-    create_dash_app,
+    render_matplotlib_figure,
+    save_visualization_png,
     validate_chart_config,
 )
 from func.io.loaders import (
@@ -191,11 +189,8 @@ class FenrirMiningWindow(QMainWindow):
         self.viz_y_column = QComboBox()
         self.viz_title = QLineEdit()
         self.viz_plot = FigureCanvas(Figure(figsize=(7, 4)))
-        self.dashboard_title = QLineEdit()
-        self.dashboard_items = QListWidget()
-        self._dashboard_configs: list[VisualizationConfig] = []
-        self._dash_thread: threading.Thread | None = None
-        self._dash_port: int | None = None
+        self.saved_visualization_items = QListWidget()
+        self._saved_visualizations: list[tuple[str, VisualizationConfig]] = []
 
         self.tabs = self._create_tabs()
         self.setCentralWidget(self.tabs)
@@ -266,7 +261,7 @@ class FenrirMiningWindow(QMainWindow):
         description = QLabel(
             "Кросс-платформенная среда для анализа данных и базового машинного "
             "обучения. Программа объединяет загрузку табличных данных из файлов и "
-            "баз, предобработку, статистический анализ, визуализацию, Dash dashboard "
+            "баз, предобработку, статистический анализ, визуализацию, сохранение PNG "
             "и обучение классических моделей scikit-learn в едином интерфейсе."
         )
         description.setWordWrap(True)
@@ -550,17 +545,15 @@ class FenrirMiningWindow(QMainWindow):
         controls_layout.addWidget(render_button)
 
         controls_layout.addSpacing(12)
-        controls_layout.addWidget(_section_label("Dash dashboard"))
-        self.dashboard_title.setText("Анализ Данных Dashboard")
-        controls_layout.addWidget(self.dashboard_title)
-        add_dashboard_button = QPushButton("Добавить график")
-        add_dashboard_button.clicked.connect(self.add_dashboard_visualization)
-        controls_layout.addWidget(add_dashboard_button)
-        self.dashboard_items.setMaximumHeight(120)
-        controls_layout.addWidget(self.dashboard_items)
-        launch_dashboard_button = QPushButton("Запустить Dash dashboard")
-        launch_dashboard_button.clicked.connect(self.start_dash_dashboard)
-        controls_layout.addWidget(launch_dashboard_button)
+        controls_layout.addWidget(_section_label("Созданные графики"))
+        add_visualization_button = QPushButton("Добавить текущий график")
+        add_visualization_button.clicked.connect(self.add_saved_visualization)
+        controls_layout.addWidget(add_visualization_button)
+        self.saved_visualization_items.setMaximumHeight(120)
+        controls_layout.addWidget(self.saved_visualization_items)
+        save_png_button = QPushButton("Сохранить выбранный PNG")
+        save_png_button.clicked.connect(self.save_selected_visualization_png)
+        controls_layout.addWidget(save_png_button)
         controls_layout.addStretch(1)
 
         plot_panel = QFrame()
@@ -656,6 +649,7 @@ class FenrirMiningWindow(QMainWindow):
         self.ab_group_column.currentTextChanged.connect(self._refresh_ab_values)
         self.viz_table.currentIndexChanged.connect(self._refresh_visualization_columns)
         self.viz_method.currentIndexChanged.connect(self._refresh_visualization_defaults)
+        self.saved_visualization_items.currentRowChanged.connect(self.preview_saved_visualization)
 
     # ----- Theme & icons -----------------------------------------------
 
@@ -849,6 +843,9 @@ class FenrirMiningWindow(QMainWindow):
 
     def _selected_table(self, combo: QComboBox) -> LoadedTable | None:
         name = combo.currentText()
+        return self._table_by_name(name)
+
+    def _table_by_name(self, name: str) -> LoadedTable | None:
         for table in self.tables:
             if table.name == name:
                 return table
@@ -1179,7 +1176,7 @@ class FenrirMiningWindow(QMainWindow):
         except Exception as exc:
             self.show_error("Не удалось построить график", exc)
 
-    def add_dashboard_visualization(self) -> None:
+    def add_saved_visualization(self) -> None:
         table = self._selected_table(self.viz_table)
         if table is None:
             self.show_error("Нет данных", RuntimeError("Загрузите хотя бы одну таблицу."))
@@ -1187,88 +1184,66 @@ class FenrirMiningWindow(QMainWindow):
         config = self._current_visualization_config()
         try:
             validate_chart_config(table.frame, config)
+            self._draw_visualization(table.frame, config)
         except Exception as exc:
             self.show_error("Не удалось добавить график", exc)
             return
-        self._dashboard_configs.append(config)
+        self._saved_visualizations.append((table.name, config))
         label = config.title or VISUALIZATION_METHODS[config.chart_type]
-        self.dashboard_items.addItem(f"{len(self._dashboard_configs)}. {label}")
+        index = len(self._saved_visualizations)
+        self.saved_visualization_items.addItem(f"{index}. {table.name}: {label}")
+        self.saved_visualization_items.setCurrentRow(index - 1)
 
-    def start_dash_dashboard(self) -> None:
-        table = self._selected_table(self.viz_table)
-        if table is None:
-            self.show_error("Нет данных", RuntimeError("Загрузите хотя бы одну таблицу."))
+    def preview_saved_visualization(self, row: int) -> None:
+        if row < 0 or row >= len(self._saved_visualizations):
             return
-        if not self._dashboard_configs:
-            self.add_dashboard_visualization()
-            if not self._dashboard_configs:
-                return
-        if self._dash_thread and self._dash_thread.is_alive() and self._dash_port:
-            QMessageBox.information(
-                self,
-                "Dash dashboard",
-                f"Dashboard уже запущен: http://127.0.0.1:{self._dash_port}/",
-            )
+        table_name, config = self._saved_visualizations[row]
+        table = self._table_by_name(table_name)
+        if table is None:
+            self.show_error("Нет данных", RuntimeError(f"Таблица '{table_name}' больше недоступна."))
             return
         try:
-            app = create_dash_app(
-                table.frame,
-                self._dashboard_configs,
-                self.dashboard_title.text().strip() or "Анализ Данных Dashboard",
-            )
-            self._dash_port = _free_port()
-            self._dash_thread = threading.Thread(
-                target=lambda: app.run(
-                    host="127.0.0.1",
-                    port=self._dash_port,
-                    debug=False,
-                    use_reloader=False,
-                ),
-                daemon=True,
-            )
-            self._dash_thread.start()
+            self._draw_visualization(table.frame, config)
         except Exception as exc:
-            self.show_error("Не удалось запустить Dash dashboard", exc)
+            self.show_error("Не удалось показать график", exc)
+
+    def save_selected_visualization_png(self) -> None:
+        selected = self._selected_saved_visualization()
+        if selected is None:
+            self.show_error("Нет графика", RuntimeError("Добавьте график и выберите его в списке."))
+            return
+        table, config = selected
+        file_name, _ = QFileDialog.getSaveFileName(
+            self,
+            "Сохранить график PNG",
+            _png_file_name(config),
+            "PNG изображение (*.png)",
+        )
+        if not file_name:
+            return
+        try:
+            saved_path = save_visualization_png(table.frame, config, file_name)
+        except Exception as exc:
+            self.show_error("Не удалось сохранить PNG", exc)
             return
         QMessageBox.information(
             self,
-            "Dash dashboard",
-            f"Dashboard запущен: http://127.0.0.1:{self._dash_port}/",
+            "PNG сохранён",
+            f"График сохранён:\n{saved_path}",
         )
 
+    def _selected_saved_visualization(self) -> tuple[LoadedTable, VisualizationConfig] | None:
+        row = self.saved_visualization_items.currentRow()
+        if row < 0 or row >= len(self._saved_visualizations):
+            return None
+        table_name, config = self._saved_visualizations[row]
+        table = self._table_by_name(table_name)
+        if table is None:
+            return None
+        return table, config
+
     def _draw_visualization(self, frame: pd.DataFrame, config: VisualizationConfig) -> None:
-        self.viz_plot.figure.clear()
-        axes = self.viz_plot.figure.add_subplot(111)
-        title = config.title or VISUALIZATION_METHODS[config.chart_type]
-        if config.chart_type == "line":
-            frame.plot(kind="line", x=config.x_column, y=config.y_column, ax=axes)
-        elif config.chart_type == "bar":
-            frame.plot(kind="bar", x=config.x_column, y=config.y_column, ax=axes)
-        elif config.chart_type == "pie":
-            if config.x_column and config.y_column:
-                data = frame.groupby(config.x_column, dropna=False)[config.y_column].sum()
-            else:
-                column = config.x_column or config.y_column
-                data = frame[column].value_counts(dropna=False)
-            data.plot(kind="pie", autopct="%1.1f%%", ax=axes)
-            axes.set_ylabel("")
-        elif config.chart_type == "heatmap":
-            matrix = frame.select_dtypes(include="number").corr()
-            sns.heatmap(matrix, annot=True, cmap="Greys", center=0, ax=axes)
-        elif config.chart_type == "scatter":
-            axes.scatter(frame[config.x_column], frame[config.y_column], color="#000000")
-            axes.set_xlabel(config.x_column)
-            axes.set_ylabel(config.y_column)
-        elif config.chart_type == "histogram":
-            column = config.x_column or config.y_column
-            frame[column].plot(kind="hist", bins=20, color="#000000", ax=axes)
-            axes.set_xlabel(column)
-        elif config.chart_type == "box":
-            column = config.y_column or config.x_column
-            frame[[column]].plot(kind="box", ax=axes)
-        axes.set_title(title)
-        axes.tick_params(axis="x", rotation=25)
-        self.viz_plot.figure.tight_layout()
+        render_matplotlib_figure(frame, config, self.viz_plot.figure)
         self.viz_plot.draw()
 
     # ----- Machine learning --------------------------------------------
@@ -1438,6 +1413,13 @@ def _field_label(text: str) -> QLabel:
     return label
 
 
+def _png_file_name(config: VisualizationConfig) -> str:
+    label = config.title or VISUALIZATION_METHODS[config.chart_type]
+    safe = "".join(character if character.isalnum() or character in {"-", "_"} else "_" for character in label)
+    safe = safe.strip("_")
+    return f"{safe or 'visualization'}.png"
+
+
 def _create_method_selector(entries: list[tuple[str, QWidget]]) -> tuple[QToolButton, QStackedWidget]:
     button = QToolButton()
     button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
@@ -1521,12 +1503,6 @@ def _parameter_value(spec: dict[str, Any], editor: QWidget) -> Any:
     if kind == "bool" and isinstance(editor, QCheckBox):
         return editor.isChecked()
     raise TypeError(f"Unsupported parameter widget for {spec['name']}")
-
-
-def _free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
 
 
 def _dark_stylesheet() -> str:

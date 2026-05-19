@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from pathlib import Path
 
 import pandas as pd
+import seaborn as sns
+from matplotlib.figure import Figure
 
 
 VISUALIZATION_METHODS: dict[str, str] = {
@@ -57,65 +59,63 @@ def validate_chart_config(
     return config
 
 
-def create_dash_app(
+def render_matplotlib_figure(
     frame: pd.DataFrame,
-    configs: list[VisualizationConfig],
-    title: str = "Анализ Данных Dashboard",
-) -> Any:
-    if not configs:
-        raise ValueError("Add at least one visualization to the dashboard.")
-    for config in configs:
-        validate_chart_config(frame, config)
-
-    try:
-        from dash import Dash, dcc, html
-    except ImportError as exc:
-        raise ImportError("dash is required to create dashboards.") from exc
-
-    app = Dash(__name__)
-    app.layout = html.Div(
-        [
-            html.H1(title),
-            *[
-                html.Section(
-                    [
-                        html.H2(config.title or VISUALIZATION_METHODS[config.chart_type]),
-                        dcc.Graph(figure=_plotly_figure(frame, config)),
-                    ]
-                )
-                for config in configs
-            ],
-        ],
-        style={"fontFamily": "Arial, sans-serif", "padding": "24px"},
-    )
-    return app
-
-
-def _plotly_figure(frame: pd.DataFrame, config: VisualizationConfig) -> Any:
-    import plotly.express as px
-
+    config: VisualizationConfig,
+    figure: Figure | None = None,
+) -> Figure:
+    validate_chart_config(frame, config)
+    target = figure or Figure(figsize=(7, 4))
+    target.clear()
+    axes = target.add_subplot(111)
     title = config.title or VISUALIZATION_METHODS[config.chart_type]
+
     if config.chart_type == "line":
-        return px.line(frame, x=config.x_column, y=config.y_column, title=title)
-    if config.chart_type == "bar":
-        return px.bar(frame, x=config.x_column, y=config.y_column, title=title)
-    if config.chart_type == "pie":
+        frame.plot(kind="line", x=config.x_column, y=config.y_column, ax=axes)
+    elif config.chart_type == "bar":
+        frame.plot(kind="bar", x=config.x_column, y=config.y_column, ax=axes)
+    elif config.chart_type == "pie":
         if config.x_column and config.y_column:
-            data = frame.groupby(config.x_column, dropna=False, as_index=False)[config.y_column].sum()
-            return px.pie(data, names=config.x_column, values=config.y_column, title=title)
+            data = frame.groupby(config.x_column, dropna=False)[config.y_column].sum()
+        else:
+            column = config.x_column or config.y_column
+            data = frame[column].value_counts(dropna=False)
+        data.plot(kind="pie", autopct="%1.1f%%", ax=axes)
+        axes.set_ylabel("")
+    elif config.chart_type == "heatmap":
+        matrix = frame.select_dtypes(include="number").corr()
+        sns.heatmap(matrix, annot=True, cmap="Greys", center=0, ax=axes)
+    elif config.chart_type == "scatter":
+        axes.scatter(frame[config.x_column], frame[config.y_column], color="#000000")
+        axes.set_xlabel(config.x_column)
+        axes.set_ylabel(config.y_column)
+    elif config.chart_type == "histogram":
         column = config.x_column or config.y_column
-        counts = frame[column].value_counts(dropna=False).reset_index()
-        counts.columns = [column, "count"]
-        return px.pie(counts, names=column, values="count", title=title)
-    if config.chart_type == "heatmap":
-        corr = frame.select_dtypes(include="number").corr()
-        return px.imshow(corr, text_auto=True, aspect="auto", title=title)
-    if config.chart_type == "scatter":
-        return px.scatter(frame, x=config.x_column, y=config.y_column, title=title)
-    if config.chart_type == "histogram":
-        column = config.x_column or config.y_column
-        return px.histogram(frame, x=column, title=title)
-    if config.chart_type == "box":
+        frame[column].plot(kind="hist", bins=20, color="#000000", ax=axes)
+        axes.set_xlabel(column)
+    elif config.chart_type == "box":
         column = config.y_column or config.x_column
-        return px.box(frame, y=column, title=title)
-    raise ValueError(f"Unsupported chart type: {config.chart_type}")
+        frame[[column]].plot(kind="box", ax=axes)
+    else:
+        raise ValueError(f"Unsupported chart type: {config.chart_type}")
+
+    axes.set_title(title)
+    axes.tick_params(axis="x", rotation=25)
+    target.tight_layout()
+    return target
+
+
+def save_visualization_png(
+    frame: pd.DataFrame,
+    config: VisualizationConfig,
+    output_path: str | Path,
+    *,
+    dpi: int = 150,
+) -> Path:
+    path = Path(output_path).expanduser()
+    if path.suffix.lower() != ".png":
+        path = path.with_suffix(".png")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    figure = render_matplotlib_figure(frame, config)
+    figure.savefig(path, format="png", dpi=dpi, bbox_inches="tight")
+    return path
