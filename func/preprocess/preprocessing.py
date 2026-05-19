@@ -8,6 +8,14 @@ import pandas as pd
 
 MISSING_STRATEGIES: tuple[str, ...] = ("drop", "mean", "median", "knn")
 JOIN_METHODS: tuple[str, ...] = ("inner", "left", "right", "outer", "cross")
+TYPE_CONVERSION_OPTIONS: tuple[str, ...] = (
+    "string",
+    "integer",
+    "float",
+    "boolean",
+    "datetime",
+    "category",
+)
 
 
 def _require_frame(frame: pd.DataFrame, name: str = "frame") -> None:
@@ -87,6 +95,70 @@ def impute_missing(
         return result
 
     raise ValueError(f"Unsupported strategy: {strategy}")
+
+
+def convert_column_types(frame: pd.DataFrame, conversions: dict[str, str]) -> pd.DataFrame:
+    """Convert each requested column to its selected pandas dtype.
+
+    Conversion errors are coerced to missing values where pandas provides a
+    nullable dtype. This keeps the operation usable from the GUI when users
+    need to clean mixed text/numeric columns before analysis or ML.
+    """
+    _require_frame(frame)
+    if not conversions:
+        raise ValueError("Choose at least one column type conversion.")
+
+    missing = [column for column in conversions if column not in frame.columns]
+    if missing:
+        raise ValueError(f"Unknown column(s): {', '.join(missing)}")
+
+    invalid = [
+        dtype for dtype in conversions.values() if dtype not in TYPE_CONVERSION_OPTIONS
+    ]
+    if invalid:
+        raise ValueError(
+            "dtype must be one of: " + ", ".join(TYPE_CONVERSION_OPTIONS)
+        )
+
+    result = frame.copy()
+    for column, dtype in conversions.items():
+        result[column] = _convert_series(result[column], dtype)
+    return result
+
+
+def _convert_series(series: pd.Series, dtype: str) -> pd.Series:
+    if dtype == "string":
+        return series.astype("string")
+    if dtype == "integer":
+        return pd.to_numeric(series, errors="coerce").astype("Int64")
+    if dtype == "float":
+        return pd.to_numeric(series, errors="coerce").astype("Float64")
+    if dtype == "boolean":
+        return _to_boolean(series)
+    if dtype == "datetime":
+        return pd.to_datetime(series, errors="coerce")
+    if dtype == "category":
+        return series.astype("category")
+    raise ValueError(f"Unsupported dtype: {dtype}")
+
+
+def _to_boolean(series: pd.Series) -> pd.Series:
+    truthy = {"1", "true", "t", "yes", "y", "да", "д", "истина"}
+    falsy = {"0", "false", "f", "no", "n", "нет", "н", "ложь"}
+
+    def normalize(value: object) -> bool | pd.NA:
+        if pd.isna(value):
+            return pd.NA
+        if isinstance(value, bool):
+            return value
+        normalized = str(value).strip().lower()
+        if normalized in truthy:
+            return True
+        if normalized in falsy:
+            return False
+        return pd.NA
+
+    return series.map(normalize).astype("boolean")
 
 
 def pivot_table(
